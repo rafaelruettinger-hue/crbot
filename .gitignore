@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Große Dateien bleiben lokal
+data/*
+!data/.gitkeep
+models/*
+!models/.gitkeep
+
+# Gerätespezifisch
+config/device.json
+
+# macOS
+.DS_Store

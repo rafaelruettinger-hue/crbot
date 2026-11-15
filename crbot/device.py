@@ -1,0 +1,63 @@
+"""ADB-Anbindung an den Emulator (MuMu Player Pro): verbinden, Screenshot, Tap."""
+import json
+import subprocess
+
+import cv2
+import numpy as np
+
+from crbot.paths import CONFIG_DIR
+
+DEVICE_FILE = CONFIG_DIR / "device.json"
+
+# Typische ADB-Ports von MuMu (Pro/12) und anderen Emulatoren
+CANDIDATE_PORTS = [16384, 16416, 16448, 7555, 5555, 5556]
+EXPECTED_SIZE = "900x2000"
+
+
+def adb(*args, serial=None, binary=False, timeout=20):
+    cmd = ["adb"] + (["-s", serial] if serial else []) + list(args)
+    res = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    if res.returncode != 0:
+        raise RuntimeError(f"ADB-Fehler: {' '.join(cmd)}\n{res.stderr.decode(errors='ignore')}")
+    return res.stdout if binary else res.stdout.decode(errors="ignore").strip()
+
+
+class Device:
+    def __init__(self, serial: str):
+        self.serial = serial
+
+    @classmethod
+    def load(cls) -> "Device":
+        if not DEVICE_FILE.exists():
+            raise SystemExit("Noch nicht verbunden. Zuerst: uv run python -m crbot.main connect")
+        return cls(json.loads(DEVICE_FILE.read_text())["serial"])
+
+    @classmethod
+    def connect(cls) -> "Device | None":
+        for port in CANDIDATE_PORTS:
+            addr = f"127.0.0.1:{port}"
+            try:
+                out = adb("connect", addr, timeout=5)
+                if "connected" not in out or "cannot" in out:
+                    continue
+                size = adb("shell", "wm", "size", serial=addr, timeout=5)
+            except Exception:
+                continue
+            CONFIG_DIR.mkdir(exist_ok=True)
+            DEVICE_FILE.write_text(json.dumps({"serial": addr}, indent=2))
+            print(f"✅ Verbunden mit {addr}  ({size})")
+            if EXPECTED_SIZE not in size:
+                print(f"⚠️  Auflösung ist nicht {EXPECTED_SIZE} – bitte in MuMu umstellen.")
+            return cls(addr)
+        print("❌ Kein Emulator gefunden. Läuft MuMu? ADB-Port in MuMu prüfen und in CANDIDATE_PORTS eintragen.")
+        return None
+
+    def screenshot(self) -> np.ndarray:
+        raw = adb("exec-out", "screencap", "-p", serial=self.serial, binary=True)
+        img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
+        if img is None:
+            raise RuntimeError("Screenshot konnte nicht gelesen werden.")
+        return img
+
+    def tap(self, x: int, y: int):
+        adb("shell", "input", "tap", str(int(x)), str(int(y)), serial=self.serial)
