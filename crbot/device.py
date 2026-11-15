@@ -22,6 +22,18 @@ def adb(*args, serial=None, binary=False, timeout=20):
     return res.stdout if binary else res.stdout.decode(errors="ignore").strip()
 
 
+def decode_raw(raw: bytes) -> np.ndarray:
+    """screencap-Rohformat: Header (12 oder 16 Byte) + RGBA-Pixel."""
+    if len(raw) < 16:
+        raise RuntimeError("Leerer Screenshot – läuft das Gerät?")
+    w, h = int.from_bytes(raw[0:4], "little"), int.from_bytes(raw[4:8], "little")
+    header = len(raw) - w * h * 4
+    if header not in (12, 16):
+        raise RuntimeError(f"Unerwartetes Screenshot-Format ({w}x{h}, Header {header}).")
+    rgba = np.frombuffer(raw, np.uint8, offset=header).reshape(h, w, 4)
+    return cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)
+
+
 class Device:
     def __init__(self, serial: str):
         self.serial = serial
@@ -30,7 +42,26 @@ class Device:
     def load(cls) -> "Device":
         if not DEVICE_FILE.exists():
             raise SystemExit("Noch nicht verbunden. Zuerst: uv run python -m crbot.main connect")
-        return cls(json.loads(DEVICE_FILE.read_text())["serial"])
+        dev = cls(json.loads(DEVICE_FILE.read_text())["serial"])
+        dev.ensure_connected()
+        return dev
+
+    def ensure_connected(self):
+        """Nach einem MuMu-Neustart ist die ADB-Verbindung weg – dann still neu verbinden."""
+        try:
+            state = adb("get-state", serial=self.serial, timeout=5)
+            if state == "device":
+                return
+        except Exception:
+            pass
+        try:
+            adb("connect", self.serial, timeout=5)
+            if adb("get-state", serial=self.serial, timeout=5) == "device":
+                print(f"🔌 Neu verbunden mit {self.serial}")
+                return
+        except Exception:
+            pass
+        raise SystemExit("❌ Emulator nicht erreichbar. Läuft das MuMu-Gerät? Sonst: uv run python -m crbot.main connect")
 
     @classmethod
     def connect(cls) -> "Device | None":
@@ -53,6 +84,15 @@ class Device:
         return None
 
     def screenshot(self) -> np.ndarray:
+        """Rohdaten statt PNG: spart das Kodieren auf dem Gerät (deutlich schneller)."""
+        try:
+            raw = adb("exec-out", "screencap", serial=self.serial, binary=True)
+        except RuntimeError:
+            self.ensure_connected()
+            raw = adb("exec-out", "screencap", serial=self.serial, binary=True)
+        return decode_raw(raw)
+
+    def screenshot_png(self) -> np.ndarray:
         raw = adb("exec-out", "screencap", "-p", serial=self.serial, binary=True)
         img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_COLOR)
         if img is None:
