@@ -2,6 +2,10 @@
 
 Vorlagen liegen in config/cards/<name>__<n>.png, Infos (Kosten, Rolle) in config/cards.json.
 Rollen: tank, troop, spell, building
+
+Wichtig: Die vier Kartenplätze sind von Hand eingemessen und liegen nie exakt gleich. Deshalb
+vergleichen wir nicht deckungsgleich, sondern suchen den KERN jeder Vorlage in einem etwas
+größeren Ausschnitt um den Kartenplatz (verschiebungstolerant, ±48 px).
 """
 import json
 import unicodedata
@@ -17,7 +21,9 @@ CARDS_INFO = CONFIG_DIR / "cards.json"
 
 # Ausschnitt um die Kartenmitte (Bildbereich der Karte, ohne Kostenanzeige unten)
 HALF_W, TOP, BOTTOM = 60, 80, 40
-MATCH_SIZE = (64, 80)
+CORE_TRIM = 22          # so viel Rand wird von einer Vorlage abgeschnitten -> „Kern“
+SEARCH_MARGIN = 26      # so viel größer ist der Suchausschnitt am Kartenplatz
+SCALE = 0.5             # halbe Auflösung reicht und ist 4x schneller
 MIN_SCORE = 0.60
 UNKNOWN_COST = 4
 
@@ -31,26 +37,44 @@ class Card:
     role: str          # tank / troop / spell / building
 
 
-def crop_slot(img: np.ndarray, center) -> np.ndarray:
+def nfc(s: str) -> str:
+    return unicodedata.normalize("NFC", s)
+
+
+def crop_slot(img: np.ndarray, center, margin: int = 0) -> np.ndarray:
     x, y = center
     h, w = img.shape[:2]
-    return img[max(y - TOP, 0):min(y + BOTTOM, h), max(x - HALF_W, 0):min(x + HALF_W, w)].copy()
+    return img[max(y - TOP - margin, 0):min(y + BOTTOM + margin, h),
+               max(x - HALF_W - margin, 0):min(x + HALF_W + margin, w)].copy()
 
 
-def to_feature(crop: np.ndarray) -> np.ndarray:
-    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
-    return cv2.resize(gray, MATCH_SIZE).astype(np.float32)
+def small_gray(img: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    return cv2.resize(gray, None, fx=SCALE, fy=SCALE, interpolation=cv2.INTER_AREA)
 
 
-def similarity(a: np.ndarray, b: np.ndarray) -> float:
-    """Korrelation zweier gleich großer Merkmalsbilder (-1 … 1), robust gegen Helligkeit."""
-    return float(cv2.matchTemplate(a, b, cv2.TM_CCOEFF_NORMED)[0, 0])
+def core(img: np.ndarray) -> np.ndarray:
+    """Kern einer Vorlage (Rand abgeschnitten), verkleinert."""
+    t = CORE_TRIM
+    inner = img[t:-t, t:-t] if img.shape[0] > 3 * t and img.shape[1] > 3 * t else img
+    return small_gray(inner)
+
+
+def score(search_small: np.ndarray, core_small: np.ndarray) -> float:
+    """Beste Übereinstimmung des Kerns irgendwo im Suchbild (-1 … 1)."""
+    if search_small.shape[0] < core_small.shape[0] or search_small.shape[1] < core_small.shape[1]:
+        return -1.0
+    return float(cv2.matchTemplate(search_small, core_small, cv2.TM_CCOEFF_NORMED).max())
+
+
+def is_blank(img: np.ndarray) -> bool:
+    return float(small_gray(img).std()) < 8
 
 
 def load_info() -> dict:
     if not CARDS_INFO.exists():
         return {}
-    return {unicodedata.normalize("NFC", k): v for k, v in json.loads(CARDS_INFO.read_text()).items()}
+    return {nfc(k): v for k, v in json.loads(CARDS_INFO.read_text()).items()}
 
 
 def save_info(info: dict):
@@ -59,22 +83,25 @@ def save_info(info: dict):
 
 
 def load_templates() -> list[tuple[str, np.ndarray]]:
+    """Liste aus (Name, Kern)."""
     out = []
     if CARDS_DIR.exists():
         for p in sorted(CARDS_DIR.glob("*.png")):
             img = cv2.imread(str(p))
             if img is not None:
-                out.append((unicodedata.normalize("NFC", p.stem.split("__")[0]), to_feature(img)))
+                out.append((nfc(p.stem.split("__")[0]), core(img)))
     return out
 
 
-def best_match(feature: np.ndarray, templates) -> tuple[str, float]:
-    best, score = "?", -1.0
+def best_match(search_img: np.ndarray, templates) -> tuple[str, float]:
+    """search_img: Farbausschnitt (Kartenplatz oder gespeicherter Ausschnitt)."""
+    search = small_gray(search_img)
+    best, best_score = "?", -1.0
     for name, tpl in templates:
-        s = similarity(feature, tpl)
-        if s > score:
-            best, score = name, s
-    return best, score
+        s = score(search, tpl)
+        if s > best_score:
+            best, best_score = name, s
+    return best, best_score
 
 
 class HandReader:
@@ -86,9 +113,9 @@ class HandReader:
     def read(self, img: np.ndarray) -> list[Card]:
         hand = []
         for i, center in enumerate(self.slots, start=1):
-            name, score = best_match(to_feature(crop_slot(img, center)), self.templates)
-            if score < MIN_SCORE:
+            name, s = best_match(crop_slot(img, center, SEARCH_MARGIN), self.templates)
+            if s < MIN_SCORE:
                 name = "?"
             meta = self.info.get(name, {})
-            hand.append(Card(i, name, score, meta.get("cost", UNKNOWN_COST), meta.get("role", "troop")))
+            hand.append(Card(i, name, s, meta.get("cost", UNKNOWN_COST), meta.get("role", "troop")))
         return hand

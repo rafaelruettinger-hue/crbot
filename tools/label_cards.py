@@ -1,8 +1,7 @@
 """Gesammelte Karten-Ausschnitte benennen -> config/cards/ + config/cards.json"""
 import cv2
 
-from crbot.vision.hand import (CARDS_DIR, best_match, load_info, load_templates,
-                               save_info, to_feature)
+from crbot.vision.hand import CARDS_DIR, best_match, core, load_info, load_templates, nfc, save_info
 from tools.collect_cards import UNKNOWN_DIR
 
 ROLES = {"t": "tank", "n": "troop", "s": "spell", "b": "building"}
@@ -32,7 +31,7 @@ def main():
         if img is None:
             p.unlink()
             continue
-        name, score = best_match(to_feature(img), templates)
+        name, score = best_match(img, templates)
         if score >= AUTO:
             print(f"  {p.name}: automatisch = {name} ({score:.2f}) – gelöscht")
             p.unlink()
@@ -40,6 +39,7 @@ def main():
         cv2.imshow(win, cv2.resize(img, None, fx=2.5, fy=2.5, interpolation=cv2.INTER_NEAREST))
         cv2.waitKey(400)
         ans = input(f"{p.name} (Vorschlag: {name} {score:.2f}) > ").strip().lower().replace(" ", "_")
+        ans = nfc(ans)
         if ans == "q":
             break
         if ans == "x":
@@ -57,7 +57,7 @@ def main():
         n = len(list(CARDS_DIR.glob(f"{ans}__*.png"))) + 1
         target = CARDS_DIR / f"{ans}__{n}.png"
         p.rename(target)
-        templates.append((ans, to_feature(img)))
+        templates.append((ans, core(img)))
         print(f"  ✅ gespeichert als {target.name}")
     cv2.destroyAllWindows()
     cv2.waitKey(1)
