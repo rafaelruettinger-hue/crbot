@@ -55,9 +55,23 @@ def find_units(img: np.ndarray, points: dict) -> list[tuple[int, int]]:
     return units
 
 
+def densest_cluster(units: list, radius: int = 110) -> tuple[int, tuple]:
+    """Größte Gruppe eng beieinander stehender Einheiten -> (Anzahl, Mittelpunkt). Für Flächenzauber."""
+    best_n, best_c = 0, (0, 0)
+    for ux, uy in units:
+        near = [(x, y) for x, y in units if (x - ux) ** 2 + (y - uy) ** 2 <= radius ** 2]
+        if len(near) > best_n:
+            best_n = len(near)
+            best_c = (sum(x for x, _ in near) // len(near), sum(y for _, y in near) // len(near))
+    return best_n, best_c
+
+
 def find_threats(img: np.ndarray, points: dict) -> dict[str, Threat]:
-    units = find_units(img, points)
-    mid = img.shape[1] // 2
+    return group_threats(find_units(img, points), img.shape[1])
+
+
+def group_threats(units: list, width: int) -> dict[str, Threat]:
+    mid = width // 2
     threats = {}
     for lane in ("left", "right"):
         us = [u for u in units if (u[0] < mid) == (lane == "left")]

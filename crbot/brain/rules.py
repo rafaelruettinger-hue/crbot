@@ -15,11 +15,14 @@ import time
 import unicodedata
 
 from crbot.device import Device
-from crbot.vision.elixir import read_elixir
-from crbot.vision.enemies import Threat, find_threats
+from crbot.vision.elixir import bar_visible, read_elixir
+from crbot.vision.enemies import Threat, densest_cluster, find_units, group_threats
 from crbot.vision.hand import Card, HandReader, in_battle
 
 LANE_COOLDOWN = 2.0     # Sekunden Pause pro Spur nach einer Verteidigung
+SPELL_COOLDOWN = 7.0    # nicht zwei Zauber kurz nacheinander auf dieselbe Spur
+STATIC_AFTER = 4.0      # steht etwas so lange unbewegt auf der Gegnerseite: Gebäude/Fehlalarm -> ignorieren
+DEFEND_WINDOW = 8.0     # in diesem Zeitraum höchstens so viele Verteidiger wie nötig
 PLAY_PAUSE = 0.8        # Pause nach jedem Zug (Elixieranzeige braucht kurz)
 PUSH_SECONDS = 12       # so lange gilt ein gestarteter Angriff als „läuft“
 STATUS_EVERY = 2.0
@@ -64,6 +67,9 @@ class RuleBot:
         self.in_battle = False
         self.hand_reader = hand_reader or HandReader(points)
         self.last_defend = {"left": 0.0, "right": 0.0}
+        self.last_spell = {"left": 0.0, "right": 0.0}
+        self.recent_defenders = {"left": [], "right": []}
+        self.seen_cells: dict = {}                         # Rasterzelle -> (zuerst gesehen, zuletzt gesehen)
         self.push_lane, self.push_until = random.choice(["left", "right"]), 0.0
         self.last_status = 0.0
         self.bridge_y = (points["bridge_left"][1] + points["bridge_right"][1]) // 2
@@ -124,38 +130,72 @@ class RuleBot:
         print(f"· Elixier {elixir:>2} | Hand: {h} | Gegner: {g}")
 
     # ---------- V: Verteidigen ----------
+    def drop_static(self, units: list, now: float) -> list:
+        """Was auf der GEGNERSEITE länger unbewegt steht (Gebäude, Fehlalarm), ist keine Bedrohung."""
+        keep = []
+        for x, y in units:
+            cell = (x // 40, y // 40)
+            first, _ = self.seen_cells.get(cell, (now, now))
+            self.seen_cells[cell] = (first, now)
+            if y < self.bridge_y - 20 and now - first > STATIC_AFTER:
+                continue
+            keep.append((x, y))
+        self.seen_cells = {c: v for c, v in self.seen_cells.items() if now - v[1] < 1.5}
+        return keep
+
+    def try_spell(self, t: Threat, hand, elixir, now) -> bool:
+        """Flächenzauber nur auf eine ENGE Gruppe nahe der Brücke oder auf unserer Seite."""
+        if now - self.last_spell[t.lane] < SPELL_COOLDOWN:
+            return False
+        n, centre = densest_cluster(t.units)
+        if n < 3 or centre[1] < self.bridge_y - 120:
+            return False
+        target = (centre[0], centre[1] + 60)                # Gegner laufen auf uns zu -> vorhalten
+        if c := self.affordable(hand, elixir, lambda c: "swarm_spell" in tags(c)):
+            self.last_spell[t.lane] = now
+            return self.play(c[0], target, f"enge Gruppe ({n}) {t.lane}: Flächenzauber", own_side=False)
+        if n >= 4 and (c := self.affordable(hand, elixir, lambda c: "area_spell" in tags(c))):
+            self.last_spell[t.lane] = now
+            return self.play(c[0], target, f"enge Gruppe ({n}) {t.lane}: Feuerball", own_side=False)
+        return False
+
     def defend(self, t: Threat, hand, elixir) -> bool:
-        lane = t.lane
+        lane, now = t.lane, time.time()
         early = 140 if self.style["defend_early"] else 40
         crossed = t.front_y >= self.bridge_y - early       # an/über der Brücke
-        lead = (t.center[0], t.center[1] + 70)             # Gegner laufen auf uns zu -> etwas vorhalten
+        at_tower = t.front_y > self.p[f"defend_{lane}"][1] - 60
 
-        if t.count >= 3:                                   # Schwarm
-            for tag in ("swarm_spell", "area_spell"):
-                if c := self.affordable(hand, elixir, lambda c: tag in tags(c)):
-                    return self.play(c[0], lead, f"Schwarm ({t.count}) {lane}: Flächenzauber", own_side=False)
-            if c := self.affordable(hand, elixir, lambda c: "splash" in tags(c)):
-                return self.play(c[0], self.spot_behind(lane), f"Schwarm ({t.count}) {lane}: Flächenschaden")
+        if self.try_spell(t, hand, elixir, now):
+            return True
         if not crossed:
             return False                                   # noch drüben: Elixier sparen, kommen lassen
+
+        # Nicht mehr Verteidiger als nötig: 1 Gegner -> 1, bis 3 -> 2, mehr -> 3 (am Turm: einer mehr)
+        self.recent_defenders[lane] = [x for x in self.recent_defenders[lane] if now - x < DEFEND_WINDOW]
+        allowed = (1 if t.count == 1 else 2 if t.count <= 3 else 3) + (1 if at_tower else 0)
+        if len(self.recent_defenders[lane]) >= allowed:
+            return False
+
+        def troop(card, spot, why):
+            self.recent_defenders[lane].append(now)
+            return self.play(card, spot, why)
+
         if t.count == 1:
             if c := self.affordable(hand, elixir, lambda c: "killer" in tags(c)):
-                return self.play(c[0], self.spot_in_front(t), f"Einzelner Gegner {lane}: Killer davor")
+                return troop(c[0], self.spot_in_front(t), f"Einzelner Gegner {lane}: Killer davor")
         if t.count >= 2:
             if c := self.affordable(hand, elixir, lambda c: "ranged" in tags(c)):
-                return self.play(c[0], self.spot_behind(lane), f"{t.count} Gegner {lane}: Fernkämpfer dahinter")
+                return troop(c[0], self.spot_behind(lane), f"{t.count} Gegner {lane}: Fernkämpfer dahinter")
         if c := self.affordable(hand, elixir, lambda c: c.role == "building"):
-            return self.play(c[0], self.spot_pull(lane), f"Gebäude lenkt {lane} ab")
+            return troop(c[0], self.spot_pull(lane), f"Gebäude lenkt {lane} ab")
         if c := self.affordable(hand, elixir, lambda c: "melee" in tags(c)):
-            return self.play(c[0], self.spot_in_front(t), f"Nahkämpfer stellt sich {lane} in den Weg")
+            return troop(c[0], self.spot_in_front(t), f"Nahkämpfer stellt sich {lane} in den Weg")
         if c := self.affordable(hand, elixir, lambda c: c.role == "troop"):
             spot = self.spot_behind(lane) if "ranged" in tags(c[0]) else self.spot_in_front(t)
-            return self.play(c[0], spot, f"verteidigen {lane}")
-        if t.front_y > self.p[f"defend_{lane}"][1] - 60:   # Gegner schon am Turm: Notlösungen
-            if c := self.affordable(hand, elixir, lambda c: c.role == "spell"):
-                return self.play(c[0], lead, f"Notfall-Zauber {lane}", own_side=False)
+            return troop(c[0], spot, f"verteidigen {lane}")
+        if at_tower:                                       # Gegner schon am Turm: Notlösung
             if c := self.affordable(hand, elixir, lambda c: c.role == "tank"):
-                return self.play(c[0], self.spot_in_front(t), f"Tank blockt {lane}")
+                return troop(c[0], self.spot_in_front(t), f"Tank blockt {lane}")
         return False
 
     # ---------- K + P: Angreifen ----------
@@ -205,16 +245,19 @@ class RuleBot:
             img = self.dev.screenshot()
         if hand is None:
             hand = self.hand_reader.read(img)
-        self.in_battle = in_battle(hand)
+        self.in_battle = bar_visible(img, self.p) and in_battle(hand)
         if not self.in_battle:
             return False                                   # kein Kampf zu sehen (Menü, Ladebildschirm)
         elixir = read_elixir(img, self.p)
-        threats = find_threats(img, self.p)
+        raw_units = find_units(img, self.p)
+        threats = group_threats(self.drop_static(raw_units, time.time()), img.shape[1])
         if self.rec:
-            self.rec.state(img, elixir, hand, threats)
+            self.rec.state(img, elixir, hand, raw_units)
         self.status(elixir, hand, threats)
-        now = time.time()
+        return self.decide(hand, elixir, threats)
 
+    def decide(self, hand, elixir, threats) -> bool:
+        now = time.time()
         for t in sorted(threats.values(), key=lambda t: (t.front_y, t.count), reverse=True):
             if now - self.last_defend[t.lane] < LANE_COOLDOWN:
                 continue
@@ -263,6 +306,11 @@ def run_auto(device: Device, points: dict, max_games: int | None = None):
     def end_game(img, sure=False):
         nonlocal bot, rec, games
         meta = rec.finish(img, sure)
+        if meta["seconds"] < 20 and meta["actions"] == 0:   # Fehlstart (kein echter Kampf) -> verwerfen
+            import shutil
+            shutil.rmtree(rec.dir, ignore_errors=True)
+            bot = rec = None
+            return
         games += 1
         res = meta["result"]
         outcome = ("🏆 Sieg" if res["result"] == "win" else "💀 Niederlage") + f" {res['us']}:{res['enemy']}" if res else "Ergebnis unklar"
@@ -289,7 +337,7 @@ def run_auto(device: Device, points: dict, max_games: int | None = None):
                 time.sleep(2.0)
                 continue
             hand = reader.read(img)
-            if in_battle(hand):                            # Kampf läuft
+            if bar_visible(img, points) and in_battle(hand):   # Kampf läuft
                 if rec is None:
                     known = load_games()
                     style = choose_style(known)

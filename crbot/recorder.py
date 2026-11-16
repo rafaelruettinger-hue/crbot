@@ -38,7 +38,7 @@ class Recorder:
         self.log.write(json.dumps(row, ensure_ascii=False) + "\n")
         self.log.flush()
 
-    def state(self, img, elixir, hand, threats):
+    def state(self, img, elixir, hand, units):
         frame = None
         if time.time() - self.last_frame >= FRAME_EVERY:
             self.last_frame = time.time()
@@ -46,7 +46,7 @@ class Recorder:
             frame = f"{self.frames:05d}.jpg"
             small = cv2.resize(img, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
             cv2.imwrite(str(self.dir / "frames" / frame), small, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        enemies = [list(u) for t in threats.values() for u in t.units]
+        enemies = [list(u) for u in units]
         self._write({"t": self._t(), "elixir": elixir, "hand": [c.name for c in hand],
                      "enemies": enemies, "frame": frame})
 

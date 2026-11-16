@@ -49,7 +49,7 @@ def cmd_shot():
 
 
 def cmd_see():
-    from crbot.vision.elixir import read_elixir
+    from crbot.vision.elixir import bar_visible, read_elixir
     from crbot.vision.enemies import debug_overlay, find_threats
     from crbot.vision.hand import HandReader
 
@@ -60,6 +60,8 @@ def cmd_see():
     hand = HandReader(pts).read(img)
     threats = find_threats(img, pts)
     print(f"📸 Screenshot: {shot_ms:.0f} ms")
+    if not bar_visible(img, pts):
+        print("ℹ️  Kein Kampf erkannt (Elixierbalken nicht sichtbar) – die Werte unten sind dann bedeutungslos.")
     print(f"💧 Elixier: {read_elixir(img, pts)}/10")
     print("🃏 Hand:   " + " | ".join(f"{c.slot}: {c.name} ({c.score:.2f})" for c in hand))
     if threats:
