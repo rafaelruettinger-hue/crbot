@@ -49,28 +49,39 @@ def cmd_shot():
 
 
 def cmd_see():
+    from crbot.brain.counters import de
+    from crbot.brain.rules import load_detector
     from crbot.vision.elixir import bar_visible, read_elixir
     from crbot.vision.enemies import debug_overlay, find_threats
     from crbot.vision.hand import HandReader
+    from crbot.vision.units import draw
 
     pts, dev = load_points(), Device.load()
     t0 = time.time()
     img = dev.screenshot()
     shot_ms = (time.time() - t0) * 1000
-    hand = HandReader(pts).read(img)
-    threats = find_threats(img, pts)
+    reader = HandReader(pts)
+    hand = reader.read(img)
     print(f"📸 Screenshot: {shot_ms:.0f} ms")
     if not bar_visible(img, pts):
         print("ℹ️  Kein Kampf erkannt (Elixierbalken nicht sichtbar) – die Werte unten sind dann bedeutungslos.")
     print(f"💧 Elixier: {read_elixir(img, pts)}/10")
     print("🃏 Hand:   " + " | ".join(f"{c.slot}: {c.name} ({c.score:.2f})" for c in hand))
-    if threats:
+    detector = load_detector(pts, reader.info)
+    SHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    if detector:
+        t0 = time.time()
+        units = detector.detect(img)
+        print(f"🔎 Einheiten-Erkennung: {(time.time() - t0) * 1000:.0f} ms")
+        for side, label in (("enemy", "⚠️  Gegner"), ("ally", "🛡  Eigene")):
+            found = [f"{de(u.name)} ({u.conf:.2f})" for u in units if u.side == side]
+            print(f"{label}: " + (", ".join(found) or "-"))
+        cv2.imwrite(str(SHOTS_DIR / "debug.png"), draw(img, units))
+    else:
+        threats = find_threats(img, pts)
         for t in threats.values():
             print(f"⚠️  Gegner {t.lane}: {t.count} Einheit(en), Mitte {t.center}")
-    else:
-        print("✅ Keine Gegner auf unserer Seite erkannt")
-    SHOTS_DIR.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(SHOTS_DIR / "debug.png"), debug_overlay(img, pts, threats))
+        cv2.imwrite(str(SHOTS_DIR / "debug.png"), debug_overlay(img, pts, threats))
     print("🖼  Bild mit Markierungen: data/shots/debug.png  (öffnen: open data/shots/debug.png)")
 
 

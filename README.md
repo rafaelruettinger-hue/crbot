@@ -49,8 +49,8 @@ data/, models/       Screenshots & Modelle – nicht auf GitHub
 ## Fahrplan
 
 - [x] **Stufe 1** – Grundgerüst: verbinden, Screenshot, Elixier, Mini-Bot
-- [~] **Stufe 2** – Sehen: Handkarten ✅, Gegner per roter Lebensbalken ✅, YOLO-Einheiten (offen)
-- [~] **Stufe 3** – Regel-Bot „V-K-P“ (Verteidigen · Konter · Puffer) ✅, Elixier des Gegners mitzählen (offen)
+- [x] **Stufe 2** – Sehen: Handkarten ✅, Gegner per rotem Level-Abzeichen ✅, Einheiten-Erkennung per YOLO-Modell ✅ (Modell aus ClashRoyaleBuildABot, MIT)
+- [~] **Stufe 3** – Regel-Bot „V-K-P“ ✅, passende Antwort je Gegnerkarte („L-N-F“, siehe crbot/brain/counters.py) ✅, Elixier des Gegners mitzählen (offen)
 - [ ] **Stufe 4** – Imitation Learning aus Replays (Ideen/Daten: KataCR)
 - [ ] **Stufe 5** – Reinforcement Learning
 - [ ] **Stufe 6** – Feinschliff
@@ -62,3 +62,4 @@ data/, models/       Screenshots & Modelle – nicht auf GitHub
 - **2026-11-16** – Gegner per Level-Abzeichen, Karten verschiebungstolerant, Dauerbetrieb (teach/auto), Rekorder (data/games), Spielstil-Variation pro Kampf. Offen: Ergebnis aus end.png lesen -> besten Stil lernen.
 - **2026-11-16** – Ergebnis vom Endbildschirm (Kronen zählen), Stil-Lernen per Thompson Sampling, jede Karte nur einmal pro Hand. Offen: Ergebnis-Erkennung mit echten end.png (auch Niederlage) prüfen; Gegnerzählung an echten Bildern prüfen.
 - **2026-11-16** – Auswertung des ersten aufgezeichneten Kampfes: Kampf wird jetzt am Elixierbalken erkannt (keine Fehlstarts im Menü), Elixier 10 wird gelesen, Zauber nur auf enge Gruppen mit Pause, nicht mehr Verteidiger als nötig, unbewegte Ziele auf der Gegnerseite ignoriert.
+- **2026-11-16** – Gegnerkarten erkennen: YOLO-Modell (97 Einheiten) eingebunden, Freund/Feind über rotes Abzeichen, Konter-Tabelle für das eigene Deck. Rekorder speichert jetzt alle erkannten Einheiten. Geprüft an 42 echten Kampfbildern; im laufenden Spiel noch zu testen.

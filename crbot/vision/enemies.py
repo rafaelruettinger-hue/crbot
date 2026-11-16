@@ -40,19 +40,33 @@ def badge_mask(img: np.ndarray, y0: int, y1: int) -> np.ndarray:
     return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
 
 
-def find_units(img: np.ndarray, points: dict) -> list[tuple[int, int]]:
-    """Positionen gegnerischer Einheiten (Abzeichen sitzt über dem Kopf -> etwas nach unten versetzt)."""
+def find_badges(img: np.ndarray, points: dict) -> list[tuple[int, int, int, int]]:
+    """Rote Level-Abzeichen gegnerischer Einheiten als Kästen (x, y, w, h)."""
     y0, y1 = zone(points)
     n, _, stats, _ = cv2.connectedComponentsWithStats(badge_mask(img, y0, y1))
-    units = []
+    badges = []
     for i in range(1, n):
         x, y, w, h, area = stats[i]
         if area < MIN_AREA or w < MIN_SIDE or h < MIN_SIDE or h > MAX_H:
             continue
-        # breites Objekt = Abzeichen + Lebensbalken derselben Einheit -> Abzeichen ist links
-        cx = x + (w // 2 if w < 45 else 14)
-        units.append((int(cx), int(y + y0 + h + 30)))
-    return units
+        if x + w / 2 > img.shape[1] - 55 or x + w / 2 < 40:   # Kronen-Anzeige am Bildrand, keine Einheit
+            continue
+        if w > 170 or (w > 100 and h > 32):                  # rote Schrift („Nicht genug Elixier!“)
+            continue
+        badges.append((int(x), int(y + y0), int(w), int(h)))
+    return badges
+
+
+def badge_to_unit(badge) -> tuple[int, int]:
+    """Abzeichen sitzt über dem Kopf -> Position der Einheit etwas darunter."""
+    x, y, w, h = badge
+    # breites Objekt = Abzeichen + Lebensbalken derselben Einheit -> Abzeichen ist links
+    return (x + (w // 2 if w < 45 else 14), y + h + 30)
+
+
+def find_units(img: np.ndarray, points: dict) -> list[tuple[int, int]]:
+    """Positionen gegnerischer Einheiten (ohne zu wissen, welche es sind)."""
+    return [badge_to_unit(b) for b in find_badges(img, points)]
 
 
 def densest_cluster(units: list, radius: int = 110) -> tuple[int, tuple]:
