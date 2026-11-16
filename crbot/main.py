@@ -59,7 +59,7 @@ def cmd_see():
     print("🃏 Hand:   " + " | ".join(f"{c.slot}: {c.name} ({c.score:.2f})" for c in hand))
     if threats:
         for t in threats.values():
-            print(f"⚠️  Gegner {t.lane}: {t.pixels} rote Pixel, Mitte {t.center}")
+            print(f"⚠️  Gegner {t.lane}: {t.count} Einheit(en), Mitte {t.center}")
     else:
         print("✅ Keine Gegner auf unserer Seite erkannt")
     SHOTS_DIR.mkdir(parents=True, exist_ok=True)

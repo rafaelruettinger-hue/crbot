@@ -1,21 +1,49 @@
-"""Stufe 2/3: Regel-Bot.
+"""Regel-Bot.
 
-Merkhilfe – „V-K-P“:
-  V = Verteidigen: Gegner auf unserer Seite? -> passende Karte auf die bedrohte Spur.
-  K = Konter:      Nach erfolgreicher Verteidigung auf DERSELBEN Spur angreifen.
-  P = Puffer:      Sonst sparen – erst ab 9 Elixier angreifen, damit nichts verfällt.
+Merkhilfe „V-K-P“:
+  V = Verteidigen: Gegner kommt -> passende Antwort auf die bedrohte Spur.
+  K = Konter:      Danach auf DERSELBEN Spur angreifen.
+  P = Puffer:      Sonst sparen; ab 9 Elixier angreifen, bei 10 IMMER etwas spielen.
+
+Passende Antwort (so gut es ohne Karten-Erkennung des Gegners geht):
+  3+ Einheiten (Schwarm)  -> Flächenzauber (Pfeile, sonst Feuerball)
+  1 Einheit               -> Einzelziel-Killer (Mini-P.E.K.K.A), sonst Nahkämpfer davor
+  2 Einheiten             -> Fernkämpfer dahinter + Nahkämpfer davor
 """
+import random
 import time
+import unicodedata
 
 from crbot.device import Device
 from crbot.vision.elixir import read_elixir
-from crbot.vision.enemies import find_threats
+from crbot.vision.enemies import Threat, find_threats
 from crbot.vision.hand import Card, HandReader
 
-BIG_THREAT = 220        # so viele rote Pixel = große Gruppe -> Zauber lohnt sich
-LANE_COOLDOWN = 2.5     # Sekunden Pause pro Spur nach einer Verteidigung
-PLAY_PAUSE = 0.9        # Pause nach jedem Zug (Elixieranzeige braucht kurz)
-MIN_KNOWN_CARDS = 2     # weniger erkannt = vermutlich kein Kampf (Menü) -> nichts tun
+LANE_COOLDOWN = 2.0     # Sekunden Pause pro Spur nach einer Verteidigung
+PLAY_PAUSE = 0.8        # Pause nach jedem Zug (Elixieranzeige braucht kurz)
+PUSH_SECONDS = 12       # so lange gilt ein gestarteter Angriff als „läuft“
+STATUS_EVERY = 2.0
+JITTER = 22
+
+# Wissen über Karten (Name wie beim Benennen; unbekannte Namen nutzen nur ihre Rolle).
+TAGS = {
+    "pfeile": {"swarm_spell"}, "zap": {"swarm_spell"}, "knall": {"swarm_spell"},
+    "feuerball": {"area_spell"}, "gift": {"area_spell"},
+    "minipekka": {"killer", "melee"}, "pekka": {"killer", "melee"}, "prinz": {"killer", "melee"},
+    "ritter": {"melee"}, "walkuere": {"melee", "splash"}, "walküre": {"melee", "splash"},
+    "musketier": {"ranged"}, "musketierin": {"ranged"}, "bogenschützen": {"ranged"},
+    "bogenschuetzen": {"ranged"}, "speerkobolde": {"ranged"}, "magier": {"ranged", "splash"},
+    "babydrache": {"ranged", "splash"}, "lakaien": {"ranged"}, "bomber": {"ranged", "splash"},
+    "kobolde": {"melee"}, "skelette": {"melee"},
+}
+
+
+def norm(name: str) -> str:
+    return unicodedata.normalize("NFC", name).lower()
+
+
+def tags(card: Card) -> set:
+    return TAGS.get(norm(card.name), set())
 
 
 class RuleBot:
@@ -23,67 +51,159 @@ class RuleBot:
         self.dev, self.p = device, points
         self.hand_reader = HandReader(points)
         self.last_defend = {"left": 0.0, "right": 0.0}
-        self.counter_lane = "left"
+        self.push_lane, self.push_until = random.choice(["left", "right"]), 0.0
+        self.last_status = 0.0
+        self.bridge_y = (points["bridge_left"][1] + points["bridge_right"][1]) // 2
+        self.back_y = points["behind_king"][1]
+        self.mid_x = (points["bridge_left"][0] + points["bridge_right"][0]) // 2
+
+    # ---------- Orte ----------
+    def lane_x(self, lane): return self.p[f"bridge_{lane}"][0]
+    def inward(self, lane, px): return self.lane_x(lane) + (px if lane == "left" else -px)
+
+    def clamp(self, x, y):
+        """Nur auf unserer Seite ablegen (unterhalb des Flusses, oberhalb der Karten)."""
+        return (int(min(max(x, 60), 840)), int(min(max(y, self.bridge_y + 15), self.back_y + 10)))
+
+    def jitter(self, pos, own_side=True):
+        x, y = pos[0] + random.randint(-JITTER, JITTER), pos[1] + random.randint(-JITTER, JITTER)
+        return self.clamp(x, y) if own_side else (int(x), int(y))
+
+    def spot_in_front(self, t: Threat):      # Nahkämpfer: dem Gegner in den Weg
+        return (self.inward(t.lane, 30), max(t.front_y + 150, self.bridge_y + 60))
+
+    def spot_behind(self, lane):             # Fernkämpfer: geschützt neben dem eigenen Turm
+        return (self.inward(lane, random.choice([70, 110, 150])), self.p[f"defend_{lane}"][1] + random.choice([60, 120]))
+
+    def spot_pull(self, lane):               # Mitte: zieht Gegner zwischen beide Türme
+        return (self.inward(lane, 200), self.p[f"defend_{lane}"][1] + 40)
+
+    def spot_back(self, lane):               # ganz hinten: langsamer Aufbau
+        return (self.inward(lane, random.choice([0, 60])), self.back_y - random.choice([0, 60]))
+
+    def spot_bridge(self, lane):
+        return self.p[f"bridge_{lane}"]
+
+    def enemy_tower(self, lane):
+        return (self.lane_x(lane), self.bridge_y - 430)
 
     # ---------- Hilfen ----------
-    def pick(self, hand: list[Card], elixir: int, roles: tuple[str, ...], cheapest=True) -> Card | None:
-        cands = [c for c in hand if c.role in roles and c.cost <= elixir]
-        if not cands:
-            return None
-        return sorted(cands, key=lambda c: c.cost, reverse=not cheapest)[0]
+    def affordable(self, hand, elixir, pred):
+        return sorted((c for c in hand if c.name != "?" and c.cost <= elixir and pred(c)), key=lambda c: c.cost)
 
-    def play(self, card: Card, target, why: str):
+    def play(self, card: Card, target, why: str, own_side=True):
+        x, y = self.jitter(target, own_side)
         self.dev.tap(*self.p[f"card{card.slot}"])
         time.sleep(0.12)
-        self.dev.tap(*target)
-        print(f"  ▶ {card.name} ({card.cost}) -> {tuple(target)}  [{why}]")
+        self.dev.tap(x, y)
+        print(f"  ▶ {card.name} ({card.cost}) -> ({x}, {y})  [{why}]")
         time.sleep(PLAY_PAUSE)
+        return True
 
-    def building_spot(self, lane: str):
-        dx, dy = self.p[f"defend_{lane}"]
-        return (int((dx + 450) / 2), dy + 40)  # Richtung Mitte: zieht Gegner zwischen die Türme
+    def status(self, elixir, hand, threats):
+        if time.time() - self.last_status < STATUS_EVERY:
+            return
+        self.last_status = time.time()
+        h = " ".join(f"{c.name}" for c in hand)
+        g = ", ".join(f"{t.lane} {t.count}" for t in threats.values()) or "-"
+        print(f"· Elixier {elixir:>2} | Hand: {h} | Gegner: {g}")
 
-    # ---------- Entscheidung ----------
+    # ---------- V: Verteidigen ----------
+    def defend(self, t: Threat, hand, elixir) -> bool:
+        lane = t.lane
+        crossed = t.front_y >= self.bridge_y - 40          # an/über der Brücke
+        lead = (t.center[0], t.center[1] + 70)             # Gegner laufen auf uns zu -> etwas vorhalten
+
+        if t.count >= 3:                                   # Schwarm
+            for tag in ("swarm_spell", "area_spell"):
+                if c := self.affordable(hand, elixir, lambda c: tag in tags(c)):
+                    return self.play(c[0], lead, f"Schwarm ({t.count}) {lane}: Flächenzauber", own_side=False)
+            if c := self.affordable(hand, elixir, lambda c: "splash" in tags(c)):
+                return self.play(c[0], self.spot_behind(lane), f"Schwarm ({t.count}) {lane}: Flächenschaden")
+        if not crossed:
+            return False                                   # noch drüben: Elixier sparen, kommen lassen
+        if t.count == 1:
+            if c := self.affordable(hand, elixir, lambda c: "killer" in tags(c)):
+                return self.play(c[0], self.spot_in_front(t), f"Einzelner Gegner {lane}: Killer davor")
+        if t.count >= 2:
+            if c := self.affordable(hand, elixir, lambda c: "ranged" in tags(c)):
+                return self.play(c[0], self.spot_behind(lane), f"{t.count} Gegner {lane}: Fernkämpfer dahinter")
+        if c := self.affordable(hand, elixir, lambda c: c.role == "building"):
+            return self.play(c[0], self.spot_pull(lane), f"Gebäude lenkt {lane} ab")
+        if c := self.affordable(hand, elixir, lambda c: "melee" in tags(c)):
+            return self.play(c[0], self.spot_in_front(t), f"Nahkämpfer stellt sich {lane} in den Weg")
+        if c := self.affordable(hand, elixir, lambda c: c.role == "troop"):
+            spot = self.spot_behind(lane) if "ranged" in tags(c[0]) else self.spot_in_front(t)
+            return self.play(c[0], spot, f"verteidigen {lane}")
+        if t.front_y > self.p[f"defend_{lane}"][1] - 60:   # Gegner schon am Turm: Notlösungen
+            if c := self.affordable(hand, elixir, lambda c: c.role == "spell"):
+                return self.play(c[0], lead, f"Notfall-Zauber {lane}", own_side=False)
+            if c := self.affordable(hand, elixir, lambda c: c.role == "tank"):
+                return self.play(c[0], self.spot_in_front(t), f"Tank blockt {lane}")
+        return False
+
+    # ---------- K + P: Angreifen ----------
+    def attack(self, hand, elixir) -> bool:
+        now, lane = time.time(), self.push_lane
+        pushing = now < self.push_until
+
+        if pushing:                                        # Angriff läuft: Unterstützung hinterher
+            if elixir >= 5 and (c := self.affordable(hand, elixir, lambda c: "ranged" in tags(c))):
+                return self.play(c[-1], (self.lane_x(lane), self.p[f"defend_{lane}"][1] + random.choice([40, 110])),
+                                 f"Unterstützung hinter dem Angriff {lane}")
+            if elixir >= 8 and (c := self.affordable(hand, elixir, lambda c: c.role == "troop")):
+                return self.play(c[-1], self.spot_bridge(lane), f"Nachschub {lane}")
+        if elixir < 9:
+            return False
+
+        if c := self.affordable(hand, elixir, lambda c: c.role == "tank"):
+            spot, how = random.choice([(self.spot_back(lane), "hinten aufbauen"),
+                                       (self.spot_behind(lane), "neben dem Turm"),
+                                       (self.spot_bridge(lane), "direkt an der Brücke")])
+            self.push_until = now + PUSH_SECONDS
+            return self.play(c[0], spot, f"Tank startet Angriff {lane} ({how})")
+        if c := self.affordable(hand, elixir, lambda c: c.role == "troop"):
+            card = c[-1]
+            if "ranged" in tags(card):
+                spot, how = self.spot_back(lane), "Fernkämpfer hinten"
+            else:
+                spot, how = random.choice([(self.spot_bridge(lane), "Brücke"), (self.spot_back(lane), "hinten")])
+            self.push_until = now + PUSH_SECONDS / 2
+            return self.play(card, spot, f"Angriff {lane} ({how})")
+        if c := self.affordable(hand, elixir, lambda c: c.role == "building"):
+            return self.play(c[0], self.spot_pull(lane), "Gebäude in die Mitte")
+        if elixir >= 10:                                   # nichts verfallen lassen
+            if c := self.affordable(hand, elixir, lambda c: "area_spell" in tags(c)):
+                return self.play(c[0], self.enemy_tower(lane), f"Zauber auf Turm {lane}", own_side=False)
+            unknown = [c for c in hand if c.name == "?"]
+            if unknown:
+                return self.play(unknown[0], self.spot_bridge(lane), "unbekannte Karte (voll)")
+            if c := self.affordable(hand, elixir, lambda c: c.role == "spell"):
+                return self.play(c[0], self.enemy_tower(lane), f"Zauber auf Turm {lane} (voll)", own_side=False)
+        return False
+
+    # ---------- ein Schritt ----------
     def step(self) -> bool:
         img = self.dev.screenshot()
         hand = self.hand_reader.read(img)
-        if sum(c.name != "?" for c in hand) < MIN_KNOWN_CARDS:
-            return False
+        if all(c.name == "?" for c in hand):
+            return False                                   # kein Kampf zu sehen (Menü, Ladebildschirm)
         elixir = read_elixir(img, self.p)
         threats = find_threats(img, self.p)
+        self.status(elixir, hand, threats)
         now = time.time()
 
-        # V – Verteidigen (größte Bedrohung zuerst)
-        for t in sorted(threats.values(), key=lambda t: t.pixels, reverse=True):
+        for t in sorted(threats.values(), key=lambda t: (t.front_y, t.count), reverse=True):
             if now - self.last_defend[t.lane] < LANE_COOLDOWN:
                 continue
-            if t.pixels >= BIG_THREAT and (c := self.pick(hand, elixir, ("spell",), cheapest=False)):
-                self.play(c, t.center, f"Zauber auf Gruppe {t.lane}")
-            elif c := self.pick(hand, elixir, ("building",)):
-                self.play(c, self.building_spot(t.lane), f"Gebäude gegen {t.lane}")
-            elif c := self.pick(hand, elixir, ("troop",)):
-                self.play(c, self.p[f"defend_{t.lane}"], f"verteidigen {t.lane}")
-            elif c := self.pick(hand, elixir, ("tank",)):
-                self.play(c, self.p[f"defend_{t.lane}"], f"Tank blockt {t.lane}")
-            else:
-                continue
-            self.last_defend[t.lane] = time.time()
-            self.counter_lane = t.lane
-            return True
+            if self.defend(t, hand, elixir):
+                self.last_defend[t.lane] = time.time()
+                self.push_lane = t.lane                    # K: Konter auf derselben Spur
+                return True
 
-        # K + P – Angreifen erst mit vollem Puffer, auf der Konter-Spur
-        if elixir >= 9:
-            lane = self.counter_lane
-            if c := self.pick(hand, elixir, ("tank",)):
-                self.play(c, self.p[f"defend_{lane}"], f"Tank startet Angriff {lane}")
-            elif c := self.pick(hand, elixir, ("troop",), cheapest=False):
-                self.play(c, self.p[f"bridge_{lane}"], f"Angriff {lane}")
-            elif elixir >= 10 and (c := self.pick(hand, elixir, ("building",))):
-                self.play(c, self.building_spot(lane), "Gebäude statt Elixier verschwenden")
-            else:
-                return False
-            return True
-        return False
+        if now >= self.push_until and not threats and random.random() < 0.02:
+            self.push_lane = random.choice(["left", "right"])
+        return self.attack(hand, elixir)
 
 
 def run(device: Device, points: dict):
@@ -95,7 +215,7 @@ def run(device: Device, points: dict):
         while True:
             try:
                 if not bot.step():
-                    time.sleep(0.25)
+                    time.sleep(0.2)
             except RuntimeError as e:
                 print(f"  ⚠️  {e} – versuche es weiter …")
                 time.sleep(2)

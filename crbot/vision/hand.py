@@ -4,6 +4,7 @@ Vorlagen liegen in config/cards/<name>__<n>.png, Infos (Kosten, Rolle) in config
 Rollen: tank, troop, spell, building
 """
 import json
+import unicodedata
 from dataclasses import dataclass
 
 import cv2
@@ -47,7 +48,9 @@ def similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def load_info() -> dict:
-    return json.loads(CARDS_INFO.read_text()) if CARDS_INFO.exists() else {}
+    if not CARDS_INFO.exists():
+        return {}
+    return {unicodedata.normalize("NFC", k): v for k, v in json.loads(CARDS_INFO.read_text()).items()}
 
 
 def save_info(info: dict):
@@ -61,7 +64,7 @@ def load_templates() -> list[tuple[str, np.ndarray]]:
         for p in sorted(CARDS_DIR.glob("*.png")):
             img = cv2.imread(str(p))
             if img is not None:
-                out.append((p.stem.split("__")[0], to_feature(img)))
+                out.append((unicodedata.normalize("NFC", p.stem.split("__")[0]), to_feature(img)))
     return out
 
 
