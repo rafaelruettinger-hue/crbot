@@ -25,6 +25,16 @@ PUSH_SECONDS = 12       # so lange gilt ein gestarteter Angriff als „läuft“
 STATUS_EVERY = 2.0
 JITTER = 22
 
+# Spielstil: Stellschrauben, die pro Kampf variiert werden können. Aus den Ergebnissen
+# lässt sich später ablesen (und lernen), welche Einstellung häufiger gewinnt.
+DEFAULT_STYLE = {"attack_at": 9, "tank_spot": "mix", "support_min": 5, "defend_early": False}
+STYLE_CHOICES = {"attack_at": [8, 9, 10], "tank_spot": ["back", "tower", "bridge", "mix"],
+                 "support_min": [4, 5, 6], "defend_early": [False, True]}
+
+
+def random_style() -> dict:
+    return {k: random.choice(v) for k, v in STYLE_CHOICES.items()}
+
 # Wissen über Karten (Name wie beim Benennen; unbekannte Namen nutzen nur ihre Rolle).
 TAGS = {
     "pfeile": {"swarm_spell"}, "zap": {"swarm_spell"}, "knall": {"swarm_spell"},
@@ -47,9 +57,12 @@ def tags(card: Card) -> set:
 
 
 class RuleBot:
-    def __init__(self, device: Device, points: dict):
+    def __init__(self, device: Device, points: dict, style: dict | None = None, hand_reader=None):
         self.dev, self.p = device, points
-        self.hand_reader = HandReader(points)
+        self.style = {**DEFAULT_STYLE, **(style or {})}
+        self.rec = None                                    # optional: Recorder
+        self.in_battle = False
+        self.hand_reader = hand_reader or HandReader(points)
         self.last_defend = {"left": 0.0, "right": 0.0}
         self.push_lane, self.push_until = random.choice(["left", "right"]), 0.0
         self.last_status = 0.0
@@ -96,6 +109,8 @@ class RuleBot:
         self.dev.tap(*self.p[f"card{card.slot}"])
         time.sleep(0.12)
         self.dev.tap(x, y)
+        if self.rec:
+            self.rec.action(card, x, y, why)
         print(f"  ▶ {card.name} ({card.cost}) -> ({x}, {y})  [{why}]")
         time.sleep(PLAY_PAUSE)
         return True
@@ -111,7 +126,8 @@ class RuleBot:
     # ---------- V: Verteidigen ----------
     def defend(self, t: Threat, hand, elixir) -> bool:
         lane = t.lane
-        crossed = t.front_y >= self.bridge_y - 40          # an/über der Brücke
+        early = 140 if self.style["defend_early"] else 40
+        crossed = t.front_y >= self.bridge_y - early       # an/über der Brücke
         lead = (t.center[0], t.center[1] + 70)             # Gegner laufen auf uns zu -> etwas vorhalten
 
         if t.count >= 3:                                   # Schwarm
@@ -148,18 +164,19 @@ class RuleBot:
         pushing = now < self.push_until
 
         if pushing:                                        # Angriff läuft: Unterstützung hinterher
-            if elixir >= 5 and (c := self.affordable(hand, elixir, lambda c: "ranged" in tags(c))):
+            if elixir >= self.style["support_min"] and (c := self.affordable(hand, elixir, lambda c: "ranged" in tags(c))):
                 return self.play(c[-1], (self.lane_x(lane), self.p[f"defend_{lane}"][1] + random.choice([40, 110])),
                                  f"Unterstützung hinter dem Angriff {lane}")
             if elixir >= 8 and (c := self.affordable(hand, elixir, lambda c: c.role == "troop")):
                 return self.play(c[-1], self.spot_bridge(lane), f"Nachschub {lane}")
-        if elixir < 9:
+        if elixir < self.style["attack_at"]:
             return False
 
         if c := self.affordable(hand, elixir, lambda c: c.role == "tank"):
-            spot, how = random.choice([(self.spot_back(lane), "hinten aufbauen"),
-                                       (self.spot_behind(lane), "neben dem Turm"),
-                                       (self.spot_bridge(lane), "direkt an der Brücke")])
+            spots = {"back": (self.spot_back(lane), "hinten aufbauen"),
+                     "tower": (self.spot_behind(lane), "neben dem Turm"),
+                     "bridge": (self.spot_bridge(lane), "direkt an der Brücke")}
+            spot, how = spots.get(self.style["tank_spot"]) or random.choice(list(spots.values()))
             self.push_until = now + PUSH_SECONDS
             return self.play(c[0], spot, f"Tank startet Angriff {lane} ({how})")
         if c := self.affordable(hand, elixir, lambda c: c.role == "troop"):
@@ -183,13 +200,18 @@ class RuleBot:
         return False
 
     # ---------- ein Schritt ----------
-    def step(self) -> bool:
-        img = self.dev.screenshot()
-        hand = self.hand_reader.read(img)
-        if all(c.name == "?" for c in hand):
+    def step(self, img=None, hand=None) -> bool:
+        if img is None:
+            img = self.dev.screenshot()
+        if hand is None:
+            hand = self.hand_reader.read(img)
+        self.in_battle = any(c.name != "?" for c in hand)
+        if not self.in_battle:
             return False                                   # kein Kampf zu sehen (Menü, Ladebildschirm)
         elixir = read_elixir(img, self.p)
         threats = find_threats(img, self.p)
+        if self.rec:
+            self.rec.state(img, elixir, hand, threats)
         self.status(elixir, hand, threats)
         now = time.time()
 
@@ -221,3 +243,67 @@ def run(device: Device, points: dict):
                 time.sleep(2)
     except KeyboardInterrupt:
         print("\n⏹  Gestoppt.")
+
+
+def run_auto(device: Device, points: dict, max_games: int | None = None):
+    """Dauerbetrieb: Kampf spielen, mitschreiben, danach selbst den nächsten Kampf starten."""
+    from crbot.nav import Navigator
+    from crbot.recorder import Recorder
+
+    nav, reader = Navigator(), HandReader(points)
+    if not reader.templates:
+        raise SystemExit("Noch keine Karten bekannt. Erst: collect, dann label.")
+    if not nav.buttons:
+        raise SystemExit("Der Bot kennt noch keine Menü-Knöpfe. Erst: uv run python -m crbot.main teach")
+    print(f"♾️  Dauerbetrieb mit {len(nav.buttons)} Knöpfen. Stoppen mit Strg+C.")
+    bot = rec = None
+    games, last_battle, last_seen, hinted = 0, 0.0, time.time(), False
+
+    def end_game(img):
+        nonlocal bot, rec, games
+        meta = rec.finish(img)
+        games += 1
+        print(f"💾 Kampf {games} gespeichert: {meta['actions']} Züge, {meta['frames']} Bilder -> {rec.dir.name}")
+        bot = rec = None
+
+    try:
+        while max_games is None or games < max_games:
+            try:
+                img = device.screenshot()
+            except RuntimeError as e:
+                print(f"  ⚠️  {e} – versuche es weiter …")
+                time.sleep(2)
+                continue
+            if btn := nav.find(img):                       # Menü/Endbildschirm: Knopf drücken
+                if rec:
+                    end_game(img)
+                    if max_games is not None and games >= max_games:
+                        break
+                print(f"  🔘 {btn.name}")
+                device.tap(btn.x, btn.y)
+                last_seen, hinted = time.time(), False
+                time.sleep(2.0)
+                continue
+            hand = reader.read(img)
+            if any(c.name != "?" for c in hand):           # Kampf läuft
+                if rec is None:
+                    style = random_style()
+                    bot = RuleBot(device, points, style, reader)
+                    bot.rec = rec = Recorder(style)
+                    print(f"\n⚔️  Kampf {games + 1} – Stil: {style}")
+                last_battle = last_seen = time.time()
+                hinted = False
+                if not bot.step(img, hand):
+                    time.sleep(0.15)
+                continue
+            if rec and time.time() - last_battle > 15:      # Kampf vorbei, aber kein bekannter Knopf
+                end_game(img)
+            if not hinted and time.time() - last_seen > 45:
+                hinted = True
+                print("  ❓ Unbekannter Bildschirm. Knopf dafür beibringen: Strg+C, dann  uv run python -m crbot.main teach")
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+    if rec:
+        rec.finish(None)
+    print(f"\n⏹  Gestoppt nach {games} Kämpfen. Aufzeichnungen: data/games/")

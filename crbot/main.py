@@ -13,7 +13,11 @@ Stufe 2 – Sehen
 
 Bots
   uv run python -m crbot.main run [MIN]     # Zufalls-Bot (Stufe 1)
-  uv run python -m crbot.main play          # Regel-Bot (Stufe 2/3)
+  uv run python -m crbot.main play          # Regel-Bot, ein Kampf (du startest ihn selbst)
+
+Dauerbetrieb
+  uv run python -m crbot.main teach [neu]   # dem Bot die Menü-Knöpfe zeigen (neu = von vorn)
+  uv run python -m crbot.main auto [N]      # spielt Kampf für Kampf allein und schreibt alles mit
 """
 import json
 import sys
@@ -100,6 +104,12 @@ def main(argv: list[str]):
     elif cmd == "play":
         from crbot.brain.rules import run
         run(Device.load(), load_points())
+    elif cmd == "teach":
+        from tools.teach_buttons import main as teach
+        teach(reset=bool(args) and args[0] == "neu")
+    elif cmd == "auto":
+        from crbot.brain.rules import run_auto
+        run_auto(Device.load(), load_points(), int(args[0]) if args else None)
     else:
         print(__doc__)
 
