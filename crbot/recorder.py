@@ -13,6 +13,7 @@ import time
 import cv2
 
 from crbot.paths import DATA_DIR
+from crbot.vision.result import read_result
 
 GAMES_DIR = DATA_DIR / "games"
 FRAME_EVERY = 1.0
@@ -54,11 +55,13 @@ class Recorder:
         self._write({"t": self._t(), "play": {"card": card.name, "slot": card.slot, "cost": card.cost,
                                              "x": x, "y": y, "why": why}})
 
-    def finish(self, end_img=None):
+    def finish(self, end_img=None, sure: bool = False):
+        result = None
         if end_img is not None:
             cv2.imwrite(str(self.dir / "end.png"), end_img)
+            result = read_result(end_img, sure)
         meta = {"style": self.style, "seconds": round(time.time() - self.t0), "actions": self.actions,
-                "frames": self.frames, "result": None}
+                "frames": self.frames, "result": result}
         (self.dir / "meta.json").write_text(json.dumps(meta, indent=2))
         self.log.close()
         return meta

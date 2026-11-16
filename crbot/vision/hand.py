@@ -111,11 +111,32 @@ class HandReader:
         self.info = load_info()
 
     def read(self, img: np.ndarray) -> list[Card]:
-        hand = []
+        """Jede Karte kann nur einmal auf der Hand sein: Die sichersten Treffer werden zuerst
+        vergeben, ein zweiter Platz mit demselben Namen bekommt seine nächstbeste Karte oder „?“."""
+        cands = []                                   # (Wert, Platz, Name)
         for i, center in enumerate(self.slots, start=1):
-            name, s = best_match(crop_slot(img, center, SEARCH_MARGIN), self.templates)
-            if s < MIN_SCORE:
-                name = "?"
+            search = small_gray(crop_slot(img, center, SEARCH_MARGIN))
+            per_name: dict[str, float] = {}
+            for name, tpl in self.templates:
+                s = score(search, tpl)
+                if s > per_name.get(name, -1.0):
+                    per_name[name] = s
+            cands += [(s, i, name) for name, s in per_name.items() if s >= MIN_SCORE]
+        chosen: dict[int, tuple[str, float]] = {}
+        used: set[str] = set()
+        for s, i, name in sorted(cands, reverse=True):
+            if i not in chosen and name not in used:
+                chosen[i] = (name, s)
+                used.add(name)
+        hand = []
+        for i in range(1, 5):
+            name, s = chosen.get(i, ("?", 0.0))
             meta = self.info.get(name, {})
             hand.append(Card(i, name, s, meta.get("cost", UNKNOWN_COST), meta.get("role", "troop")))
         return hand
+
+
+def in_battle(hand: list[Card]) -> bool:
+    """Im Kampf sind (fast) immer alle vier Karten erkennbar; ein einzelner Zufallstreffer
+    auf einem Menü- oder Endbildschirm zählt nicht."""
+    return sum(c.name != "?" for c in hand) >= 2

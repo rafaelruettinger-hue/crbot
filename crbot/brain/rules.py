@@ -17,7 +17,7 @@ import unicodedata
 from crbot.device import Device
 from crbot.vision.elixir import read_elixir
 from crbot.vision.enemies import Threat, find_threats
-from crbot.vision.hand import Card, HandReader
+from crbot.vision.hand import Card, HandReader, in_battle
 
 LANE_COOLDOWN = 2.0     # Sekunden Pause pro Spur nach einer Verteidigung
 PLAY_PAUSE = 0.8        # Pause nach jedem Zug (Elixieranzeige braucht kurz)
@@ -205,7 +205,7 @@ class RuleBot:
             img = self.dev.screenshot()
         if hand is None:
             hand = self.hand_reader.read(img)
-        self.in_battle = any(c.name != "?" for c in hand)
+        self.in_battle = in_battle(hand)
         if not self.in_battle:
             return False                                   # kein Kampf zu sehen (Menü, Ladebildschirm)
         elixir = read_elixir(img, self.p)
@@ -247,6 +247,7 @@ def run(device: Device, points: dict):
 
 def run_auto(device: Device, points: dict, max_games: int | None = None):
     """Dauerbetrieb: Kampf spielen, mitschreiben, danach selbst den nächsten Kampf starten."""
+    from crbot.brain.learn import choose_style, load_games, summary
     from crbot.nav import Navigator
     from crbot.recorder import Recorder
 
@@ -259,11 +260,14 @@ def run_auto(device: Device, points: dict, max_games: int | None = None):
     bot = rec = None
     games, last_battle, last_seen, hinted = 0, 0.0, time.time(), False
 
-    def end_game(img):
+    def end_game(img, sure=False):
         nonlocal bot, rec, games
-        meta = rec.finish(img)
+        meta = rec.finish(img, sure)
         games += 1
-        print(f"💾 Kampf {games} gespeichert: {meta['actions']} Züge, {meta['frames']} Bilder -> {rec.dir.name}")
+        res = meta["result"]
+        outcome = ("🏆 Sieg" if res["result"] == "win" else "💀 Niederlage") + f" {res['us']}:{res['enemy']}" if res else "Ergebnis unklar"
+        print(f"💾 Kampf {games}: {outcome} – {meta['actions']} Züge, {meta['frames']} Bilder -> {rec.dir.name}")
+        print(summary(load_games()))
         bot = rec = None
 
     try:
@@ -276,7 +280,7 @@ def run_auto(device: Device, points: dict, max_games: int | None = None):
                 continue
             if btn := nav.find(img):                       # Menü/Endbildschirm: Knopf drücken
                 if rec:
-                    end_game(img)
+                    end_game(img, sure=True)
                     if max_games is not None and games >= max_games:
                         break
                 print(f"  🔘 {btn.name}")
@@ -285,12 +289,13 @@ def run_auto(device: Device, points: dict, max_games: int | None = None):
                 time.sleep(2.0)
                 continue
             hand = reader.read(img)
-            if any(c.name != "?" for c in hand):           # Kampf läuft
+            if in_battle(hand):                            # Kampf läuft
                 if rec is None:
-                    style = random_style()
+                    known = load_games()
+                    style = choose_style(known)
                     bot = RuleBot(device, points, style, reader)
                     bot.rec = rec = Recorder(style)
-                    print(f"\n⚔️  Kampf {games + 1} – Stil: {style}")
+                    print(f"\n⚔️  Kampf {games + 1} – Stil (gelernt aus {len(known)} Kämpfen): {style}")
                 last_battle = last_seen = time.time()
                 hinted = False
                 if not bot.step(img, hand):

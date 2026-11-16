@@ -30,7 +30,8 @@ uv run python -m crbot.main play       # Regel-Bot, ein Kampf
 
 # Dauerbetrieb (Trainingscamp)
 uv run python -m crbot.main teach      # Menü-Knöpfe zeigen (einmalig)
-uv run python -m crbot.main auto       # spielt Kampf für Kampf, schreibt alles mit -> data/games/
+uv run python -m crbot.main auto       # spielt Kampf für Kampf, schreibt mit (data/games/) und lernt den besten Stil
+uv run python -m crbot.main stats      # Auswertung: Siege je Spielstil
 ```
 
 ## Aufbau
@@ -59,3 +60,4 @@ data/, models/       Screenshots & Modelle – nicht auf GitHub
 - **2026-11-15** – Projekt angelegt, Stufe-1-Code geschrieben.
 - **2026-11-16** – Stufe 1 läuft (kalibriert, Zufalls-Bot spielt). Stufe 2: schnellere Screenshots, Auto-Reconnect, Kartenerkennung, Gegnererkennung, Regel-Bot V-K-P.
 - **2026-11-16** – Gegner per Level-Abzeichen, Karten verschiebungstolerant, Dauerbetrieb (teach/auto), Rekorder (data/games), Spielstil-Variation pro Kampf. Offen: Ergebnis aus end.png lesen -> besten Stil lernen.
+- **2026-11-16** – Ergebnis vom Endbildschirm (Kronen zählen), Stil-Lernen per Thompson Sampling, jede Karte nur einmal pro Hand. Offen: Ergebnis-Erkennung mit echten end.png (auch Niederlage) prüfen; Gegnerzählung an echten Bildern prüfen.

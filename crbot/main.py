@@ -17,7 +17,8 @@ Bots
 
 Dauerbetrieb
   uv run python -m crbot.main teach [neu]   # dem Bot die Menü-Knöpfe zeigen (neu = von vorn)
-  uv run python -m crbot.main auto [N]      # spielt Kampf für Kampf allein und schreibt alles mit
+  uv run python -m crbot.main auto [N]      # spielt Kampf für Kampf allein, schreibt mit und lernt
+  uv run python -m crbot.main stats         # Auswertung: Siege je Spielstil
 """
 import json
 import sys
@@ -107,6 +108,9 @@ def main(argv: list[str]):
     elif cmd == "teach":
         from tools.teach_buttons import main as teach
         teach(reset=bool(args) and args[0] == "neu")
+    elif cmd == "stats":
+        from crbot.brain.learn import load_games, summary
+        print(summary(load_games()))
     elif cmd == "auto":
         from crbot.brain.rules import run_auto
         run_auto(Device.load(), load_points(), int(args[0]) if args else None)
