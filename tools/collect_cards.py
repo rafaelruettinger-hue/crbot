@@ -22,7 +22,12 @@ def main(points: dict, seconds: int = 180):
     print(f"🃏 Sammle {seconds}s lang Handkarten. Spiel dabei normal (selbst), damit viele Karten durchrotieren.")
     try:
         while time.time() < t_end:
-            img = dev.screenshot()
+            try:
+                img = dev.screenshot()
+            except RuntimeError as e:
+                print(f"  ⚠️  {e}")
+                time.sleep(2)
+                continue
             for i, c in enumerate(slots, start=1):
                 crop = crop_slot(img, c)
                 f = to_feature(crop)

@@ -93,7 +93,11 @@ def run(device: Device, points: dict):
     print("🧠 Regel-Bot läuft (V-K-P). Stoppen mit Strg+C.")
     try:
         while True:
-            if not bot.step():
-                time.sleep(0.25)
+            try:
+                if not bot.step():
+                    time.sleep(0.25)
+            except RuntimeError as e:
+                print(f"  ⚠️  {e} – versuche es weiter …")
+                time.sleep(2)
     except KeyboardInterrupt:
         print("\n⏹  Gestoppt.")

@@ -1,6 +1,7 @@
 """ADB-Anbindung an den Emulator (MuMu Player Pro): verbinden, Screenshot, Tap."""
 import json
 import subprocess
+import time
 
 import cv2
 import numpy as np
@@ -12,6 +13,7 @@ DEVICE_FILE = CONFIG_DIR / "device.json"
 # Typische ADB-Ports von MuMu (Pro/12) und anderen Emulatoren
 CANDIDATE_PORTS = [16384, 16416, 16448, 7555, 5555, 5556]
 EXPECTED_SIZE = "900x2000"
+SHOT_TIMEOUT = 4  # Sekunden; normal dauert ein Screenshot ~0,4 s
 
 
 def adb(*args, serial=None, binary=False, timeout=20):
@@ -83,14 +85,27 @@ class Device:
         print("❌ Kein Emulator gefunden. Läuft MuMu? ADB-Port in MuMu prüfen und in CANDIDATE_PORTS eintragen.")
         return None
 
-    def screenshot(self) -> np.ndarray:
-        """Rohdaten statt PNG: spart das Kodieren auf dem Gerät (deutlich schneller)."""
-        try:
-            raw = adb("exec-out", "screencap", serial=self.serial, binary=True)
-        except RuntimeError:
-            self.ensure_connected()
-            raw = adb("exec-out", "screencap", serial=self.serial, binary=True)
-        return decode_raw(raw)
+    def screenshot(self, tries: int = 4) -> np.ndarray:
+        """Rohdaten statt PNG (schneller). Der Emulator hängt gelegentlich:
+        kurzes Zeitlimit, dann neu verbinden und noch einmal versuchen."""
+        last = None
+        for attempt in range(tries):
+            try:
+                raw = adb("exec-out", "screencap", serial=self.serial, binary=True, timeout=SHOT_TIMEOUT)
+                return decode_raw(raw)
+            except (RuntimeError, subprocess.TimeoutExpired) as e:
+                last = e
+                if attempt >= 1:  # beim zweiten Fehlschlag Verbindung frisch aufbauen
+                    self.reconnect()
+                time.sleep(0.3)
+        raise RuntimeError(f"Screenshot nach {tries} Versuchen fehlgeschlagen: {last}")
+
+    def reconnect(self):
+        for args in (("disconnect", self.serial), ("connect", self.serial)):
+            try:
+                adb(*args, timeout=5)
+            except Exception:
+                pass
 
     def screenshot_png(self) -> np.ndarray:
         raw = adb("exec-out", "screencap", "-p", serial=self.serial, binary=True)

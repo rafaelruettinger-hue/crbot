@@ -12,7 +12,12 @@ def run(device: Device, points: dict, min_elixir: int = 7):
     print(f"🤖 Bot läuft (spielt ab {min_elixir} Elixier). Stoppen mit Strg+C.")
     try:
         while True:
-            img = device.screenshot()
+            try:
+                img = device.screenshot()
+            except RuntimeError as e:
+                print(f"  ⚠️  {e} – versuche es weiter …")
+                time.sleep(2)
+                continue
             elixir = read_elixir(img, points)
             if elixir >= min_elixir:
                 card, target = random.choice(cards), random.choice(targets)
