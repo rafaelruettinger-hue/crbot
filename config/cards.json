@@ -1,0 +1,34 @@
+{
+  "bogenschützen": {
+    "cost": 3,
+    "role": "troop"
+  },
+  "feuerball": {
+    "cost": 4,
+    "role": "spell"
+  },
+  "lakaien": {
+    "cost": 3,
+    "role": "troop"
+  },
+  "minipekka": {
+    "cost": 4,
+    "role": "troop"
+  },
+  "musketier": {
+    "cost": 4,
+    "role": "troop"
+  },
+  "pfeile": {
+    "cost": 3,
+    "role": "spell"
+  },
+  "riese": {
+    "cost": 5,
+    "role": "tank"
+  },
+  "ritter": {
+    "cost": 3,
+    "role": "troop"
+  }
+}
