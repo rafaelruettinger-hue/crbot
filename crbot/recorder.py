@@ -38,7 +38,7 @@ class Recorder:
         self.log.write(json.dumps(row, ensure_ascii=False) + "\n")
         self.log.flush()
 
-    def state(self, img, elixir, hand, units):
+    def state(self, img, elixir, hand, units, extra: dict | None = None):
         frame = None
         if time.time() - self.last_frame >= FRAME_EVERY:
             self.last_frame = time.time()
@@ -48,7 +48,7 @@ class Recorder:
             cv2.imwrite(str(self.dir / "frames" / frame), small, [cv2.IMWRITE_JPEG_QUALITY, 80])
         seen = [[u.name, u.side, u.pos[0], u.pos[1], round(u.conf, 2)] for u in units]
         self._write({"t": self._t(), "elixir": elixir, "hand": [c.name for c in hand],
-                     "units": seen, "frame": frame})
+                     "units": seen, "frame": frame, **(extra or {})})
 
     def action(self, card, x, y, why):
         self.actions += 1

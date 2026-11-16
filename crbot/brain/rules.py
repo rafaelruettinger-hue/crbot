@@ -13,10 +13,12 @@ import time
 
 from crbot.brain.counters import card_tags as tags
 from crbot.brain.counters import choose, de
+from crbot.brain.tracker import EnemyTracker
 from crbot.device import Device
 from crbot.vision.elixir import bar_visible, read_elixir
 from crbot.vision.enemies import badge_to_unit, find_badges
 from crbot.vision.hand import Card, HandReader, in_battle
+from crbot.vision.towers import read_towers
 from crbot.vision.units import Unit
 
 LANE_COOLDOWN = 1.5     # Sekunden Pause pro Spur nach einer Verteidigung
@@ -70,6 +72,10 @@ class RuleBot:
                          if detector == "auto" else detector)
         self.last_defend = {"left": 0.0, "right": 0.0}
         self.last_spell = {"left": 0.0, "right": 0.0}
+        self.tracker: EnemyTracker | None = None           # zählt Karten und Elixier des Gegners mit
+        self.towers: dict = {}                             # zuletzt gelesene Turm-Lebensanteile
+        self.tower_gone: dict = {}                         # Turm -> seit wann kein Balken mehr zu sehen ist
+        self.tower_hist: dict = {}                         # Turm -> letzte Ablesungen
         self.spent = {"left": [], "right": []}             # (Zeit, Elixier) der letzten Verteidigungszüge
         self.answered = {"left": [], "right": []}          # (Zeit, Gegnername), schon beantwortet
         self.seen_cells: dict = {}                         # Rasterzelle -> (zuerst gesehen, zuletzt gesehen)
@@ -139,7 +145,8 @@ class RuleBot:
             if names:
                 parts.append(label + " " + ", ".join(
                     (f"{names.count(n)}× " if names.count(n) > 1 else "") + de(n) for n in dict.fromkeys(names)))
-        print(f"· Elixier {elixir:>2} | Hand: {h} | Gegner: {' | '.join(parts) or '-'}")
+        foe = f" | Gegner-Elixier ≈ {self.tracker.elixir:.0f}" if self.tracker else ""
+        print(f"· Elixier {elixir:>2} | Hand: {h} | Gegner: {' | '.join(parts) or '-'}{foe}")
 
     # ---------- V: Verteidigen ----------
     def see(self, img) -> list[Unit]:
@@ -182,6 +189,28 @@ class RuleBot:
                     u = Unit(near.name, 0.0, u.box, "enemy", near.kind, near.air, near.hits_air, near.cost)
             out.append(u)
         return out
+
+    def update_towers(self, img, now: float):
+        for name, hp in read_towers(img, self.p).items():
+            if hp is None:
+                self.tower_gone.setdefault(name, now)
+                if now - self.tower_gone[name] > 6:        # länger kein Balken: Turm ist zerstört
+                    self.towers[name] = 0.0
+            else:
+                self.tower_gone.pop(name, None)
+                hist = self.tower_hist.setdefault(name, [])
+                hist.append(hp)
+                del hist[:-5]
+                self.towers[name] = sorted(hist)[len(hist) // 2]   # Median: einzelne Fehlablesungen glätten
+
+    def weaker_enemy_lane(self) -> str | None:
+        """Spur mit dem schwächeren, noch stehenden gegnerischen Turm (bei klarem Unterschied)."""
+        left, right = self.towers.get("enemy_left"), self.towers.get("enemy_right")
+        if left is None or right is None or left <= 0 or right <= 0:
+            return None
+        if abs(left - right) < 0.12:
+            return None
+        return "left" if left < right else "right"
 
     def by_lane(self, enemies: list[Unit]) -> dict[str, list[Unit]]:
         lanes: dict[str, list[Unit]] = {}
@@ -251,8 +280,12 @@ class RuleBot:
                                  f"Unterstützung hinter dem Angriff {lane}")
             if elixir >= 8 and (c := self.affordable(hand, elixir, lambda c: c.role == "troop")):
                 return self.play(c[-1], self.spot_bridge(lane), f"Nachschub {lane}")
-        if elixir < self.style["attack_at"]:
+        foe_low = self.tracker is not None and self.tracker.elixir <= 3 and elixir >= 6
+        if elixir < self.style["attack_at"] and not foe_low:
             return False
+        if not pushing and now - max(self.last_defend.values()) > 10:
+            lane = self.push_lane = self.weaker_enemy_lane() or lane   # schwächeren Turm angreifen
+        note = " – Gegner hat wenig Elixier" if foe_low and elixir < self.style["attack_at"] else ""
 
         if c := self.affordable(hand, elixir, lambda c: c.role == "tank"):
             spots = {"back": (self.spot_back(lane), "hinten aufbauen"),
@@ -260,7 +293,7 @@ class RuleBot:
                      "bridge": (self.spot_bridge(lane), "direkt an der Brücke")}
             spot, how = spots.get(self.style["tank_spot"]) or random.choice(list(spots.values()))
             self.push_until = now + PUSH_SECONDS
-            return self.play(c[0], spot, f"Tank startet Angriff {lane} ({how})")
+            return self.play(c[0], spot, f"Tank startet Angriff {lane} ({how}){note}")
         if c := self.affordable(hand, elixir, lambda c: c.role == "troop"):
             card = c[-1]
             if "ranged" in tags(card):
@@ -268,7 +301,7 @@ class RuleBot:
             else:
                 spot, how = random.choice([(self.spot_bridge(lane), "Brücke"), (self.spot_back(lane), "hinten")])
             self.push_until = now + PUSH_SECONDS / 2
-            return self.play(card, spot, f"Angriff {lane} ({how})")
+            return self.play(card, spot, f"Angriff {lane} ({how}){note}")
         if c := self.affordable(hand, elixir, lambda c: c.role == "building"):
             return self.play(c[0], self.spot_pull(lane), "Gebäude in die Mitte")
         if elixir >= 10:                                   # nichts verfallen lassen
@@ -291,11 +324,19 @@ class RuleBot:
         if not self.in_battle:
             return False                                   # kein Kampf zu sehen (Menü, Ladebildschirm)
         elixir = read_elixir(img, self.p)
+        now = time.time()
         units = self.see(img)
-        enemies = self.drop_static([u for u in units if u.side == "enemy"], time.time())
+        all_enemies = [u for u in units if u.side == "enemy"]
+        if self.tracker is None:
+            self.tracker = EnemyTracker(now)
+        for name in self.tracker.observe(all_enemies, now):
+            print(f"  👁  Gegner spielt {de(name)} – ihm bleiben etwa {self.tracker.elixir:.0f} Elixier")
+        self.update_towers(img, now)
+        enemies = self.drop_static(all_enemies, now)
         threats = self.by_lane(enemies)
         if self.rec:
-            self.rec.state(img, elixir, hand, units)
+            self.rec.state(img, elixir, hand, units, {"enemy_elixir": round(self.tracker.elixir, 1),
+                                                       "towers": self.towers})
         self.status(elixir, hand, threats)
         return self.decide(hand, elixir, threats)
 
